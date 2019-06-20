@@ -14,19 +14,18 @@ import os
 from bs4 import BeautifulSoup, SoupStrainer, NavigableString
 import re
 import json
-sys.path.append(os.path.join(os.getcwd(), "script"))
-from get_faculty_page import get_faculty_html
+
 
 
 
 # set argument parser
 parser = argparse.ArgumentParser(description='Get junior faculty for each school.')
-parser.add_argument("-indir", type = str,
+parser.add_argument("-pagedir", type = str,
                     help = "Directory storing input files.",
                     default = "data/faculty_page")
-parser.add_argument("-outdir", type = str,
+parser.add_argument("-parsedir", type = str,
                     help = "Directory to store output of this file.",
-                    default = "data/faculty_dir")
+                    default = "data/faculty_names")
 parser.add_argument("-school", type = str,
                     help = "Name of the school.")
 parser.add_argument("-v", "--verbose", 
@@ -34,24 +33,65 @@ parser.add_argument("-v", "--verbose",
                     action = "store_true")
 args = parser.parse_args()
 
+
 # set logging
 log = logging.getLogger(__name__)
 log.setLevel(logging.ERROR)
 if args.verbose:
     log.setLevel(logging.DEBUG)
 loghandler = logging.StreamHandler(sys.stderr)
-loghandler.setFormatter(logging.Formatter("[%(asctime)s %(message)s]"))
+loghandler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s"))
 log.addHandler(loghandler)
 
 
+""" STEP 0 """
+
+def get_html(school, url, count = 0):
+    """
+    Open the faculty page of polisci/govt department and
+    save the html content and the request headers. 
+    --------
+    school (str, name of the school)
+    url (str, url to the faculty page)
+    count (int, page count, default is 0)
+    """
+
+    r = requests.get(url)
+    log.info("Server response for {}: {}".format(school, r.status_code))
+    filename = "{}_faculty_page".format(school.replace(" ", "_"))
+    
+    # save html content to file
+    with open(os.path.join(args.pagedir, filename + str(count) + ".html"), "w") as h:
+        h.write(r.text)
+        
+    # save HTTP requests header to file
+    with open(os.path.join(args.pagedir, filename + str(count) + ".json"), "w") as t:
+        try:
+            header = {"date": r.headers['date'],
+                 "content-type": r.headers['content-type'],
+                 "last modified": r.headers['last-modified']}
+        except KeyError:
+            header = {"date": None, 
+                      "content-type": None,
+                      "last-modified" : None}
+        json.dump(header, t)
+    
+    return r.text
+
+
+"""
+STEP 1: Parse html files
+"""
+
+
 # title pattern
-title_pattern = re.compile("Assistant\s(?=Professor)|Associate\s(?=Professor)|Assistant\s(?=Teaching\sProfessor)")
+title_pattern = re.compile("Assistant\s(?=Professor)|(?<!Adjunct)\sAssociate\s(?=Professor)|Assistant\s(?=Teaching\sProfessor)")
 
 
 
 # harvard university, princeton university
 
-def get_jr_faculty0(html_file):
+def parse_school0(html, count = 0):
     """
     Parse the html of the faculty page html returned from 
     get_faculty_page.py and create a roster of junior faculty
@@ -61,8 +101,7 @@ def get_jr_faculty0(html_file):
     html_file (name of the html file to parse)
     """
 
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     
     # get the names of associate/assistant professors
@@ -74,12 +113,13 @@ def get_jr_faculty0(html_file):
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + str(count) + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
     
     
     # check if there's a next page
-    if "HARVARD" in html_file:
+    if args.school == 'HARVARD UNIVERSITY':
         li = soup.find("ul", {"class": "pager"}).find("li", {"class": "pager-next"})
         if li.find("a", href = True) != None:
             href = li.find("a", href = True)["href"]
@@ -87,28 +127,29 @@ def get_jr_faculty0(html_file):
             return href
         else:
             log.info("Reached last page")
-    if "PRINCETON" in html_file:
+            return None
+    if args.school == 'PRINCETON UNIVERSITY':
         if soup.find("li", {"class": "pager__item pager__item--next"}):
             li = soup.find("li", {"class": "pager__item pager__item--next"})
-            href = li.find("a", href = True)["href"]
+            href = url + li.find("a", href = True)["href"]
             log.info("Next url for PRINCETON is {}".format(href))
             return href
         else:
             log.info("Reached last page")
+            return None
         
 
 # stanford university, mit, columbia university, penn state u, 
 # u washington, wisconsin-madison
         
-def get_jr_faculty1(html_file):
+def parse_school1(html):
     """
     Similar to get_juniof_faculty(html_file) but does not have
     multiple pages to parse.
     -----
     html_file (str, name of the html file to parse)
     """
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     # get the names of associate/assistant professors
     list_ = []
@@ -122,13 +163,14 @@ def get_jr_faculty1(html_file):
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
 
 
 # university of north carolina, texas a & m
 
-def get_jr_faculty2(html_file):
+def parse_school2(html):
     """
     Obtains a list of junior faculty members for faculty pages
     with a table. 
@@ -136,37 +178,36 @@ def get_jr_faculty2(html_file):
     html_file (str, name of the html file to parse)
     """
     
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     # get the names of associate/assistant professors
     list_ = [] 
     for string in soup.find_all(string = title_pattern):
         tr = string.find_parent("tr")
-        if "NORTH CAROLINA" in html_file:
+        if "NORTH CAROLINA" in args.school:
             td = tr.find_all("td")[1]
             list_.append(td.string)
-        if "TEXAS A & M" in html_file:
+        if "TEXAS A & M" in args.school:
             td = tr.find_all("td")[2]
             if td.find("a").string != None:
                 list_.append(td.find("a").string)
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
     
 
 # duke university, nyu, ucsd, chicago, illinois, vanderbilt,
 # washington u in st. louis
     
-def get_jr_faculty3(html_file):
+def parse_school3(html):
     """
     html_file (str, name of the html file to parse)
     """
     
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     # get the names of associate/assistant professors
     list_ = []
@@ -176,47 +217,50 @@ def get_jr_faculty3(html_file):
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
 
 
 # uc berkeley, yale
-def get_jr_faculty4(html_file):
+def parse_school4(html, count):
     """
     Faculty members are presented in a table, but must check
     for the next page.
     ------
     html_file (str, name of the html file to parse)
     """
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     # get the names of associate/assistant professors
     list_ = [] 
     for string in soup.find_all(string = title_pattern):
-        if "BERKELEY" in html_file:
+        if "BERKELEY" in args.school:
             tr = string.find_parent("tr")
             td = tr.find_all("td")[0]
             list_.append(td.find("a").string)
-        if "YALE" in html_file:
+        if "YALE" in args.school:
             list_.append(string.find_previous("a").string)
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file 
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + str(count) + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
         
     # check if there's next page
     if soup.find("li", {"class": "pager-next"}):
         li = soup.find("li", {"class": "pager-next"})
-        href = li.find("a", href = True)['href']
+        href = url + li.find("a", href = True)['href']
         log.info("Next url is {}".format(href))
         return href 
     else:
         log.info("Reached last page")
+        return None
+
 
 # emory university
-def get_emory(html_file = 'EMORY UNIVERSITY_faculty_page.html'):
+def parse_emory(html):
     """
     Need to open individual faculty's profile to see
     position title.
@@ -224,8 +268,7 @@ def get_emory(html_file = 'EMORY UNIVERSITY_faculty_page.html'):
     html_file (str, name of the html file to parse)
     """
     
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     list_ = []
     div = soup.find("div", {"class": "data-entry"})
@@ -241,18 +284,18 @@ def get_emory(html_file = 'EMORY UNIVERSITY_faculty_page.html'):
     log.info("Junior faculty: \n {}".format(list_))
         
     # save to file
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
 
 
 # indiana university at bloomington
-def get_indiana(html_file = 'INDIANA UNIVERSITY AT BLOOMINGTON_faculty_page.html'):
+def parse_indiana(html):
     """
     html_file (str, name of the html file to parse)
     """
     
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("main"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("main"))
     
     list_ = []
     for string in soup.find_all(string = title_pattern):
@@ -261,7 +304,8 @@ def get_indiana(html_file = 'INDIANA UNIVERSITY AT BLOOMINGTON_faculty_page.html
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
 
 
@@ -269,12 +313,11 @@ def get_indiana(html_file = 'INDIANA UNIVERSITY AT BLOOMINGTON_faculty_page.html
 
 
 # ucla
-def get_ucla(html_file = 'UNIVERSITY OF CALIFORNIA-LOS ANGELES'):
+def parse_ucla(html):
     """
     html_file (str, name of the html file to parse)
     """
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("body"))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("body"))
     
     # get the names of associate/assistant professors
     list_ = [] 
@@ -283,17 +326,17 @@ def get_ucla(html_file = 'UNIVERSITY OF CALIFORNIA-LOS ANGELES'):
     log.info("Junior faculty: \n {}".format(list_))
     
     # save to file 
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") + ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
         
         
 # rochester
-def get_rochester(html_file = "UNIVERSITY OF ROCHESTER_faculty_page.html"):
+def parse_rochester(html):
     """
     html_file (str, name of the html file to parse)
     """
-    with open(os.path.join(args.indir, html_file), "r") as h:
-        soup = BeautifulSoup(h, "lxml", parse_only = SoupStrainer("table", {"class": "people-table"}))
+    soup = BeautifulSoup(html, "lxml", parse_only = SoupStrainer("table", {"class": "people-table"}))
     
     list_ = []
     for a in soup.find_all("a", {"href": re.compile("people")}):
@@ -308,14 +351,13 @@ def get_rochester(html_file = "UNIVERSITY OF ROCHESTER_faculty_page.html"):
      
      
     # save to file 
-    with open(os.path.join(args.outdir, args.school + ".json")) as j:
+    filename = args.school.replace(" ", "_") +  ".json"
+    with open(os.path.join(args.parsedir, filename), "w") as j:
         json.dump(list_, j)
 
 
 
 if __name__ == "__main__":
-    
-    html_list = [name for name in os.listdir(args.indir) if name.endswith("html")]
     
     gp0 = ['HARVARD UNIVERSITY', 'PRINCETON UNIVERSITY']
     gp1 = ['UNIVERSITY OF WISCONSIN-MADISON',
@@ -335,31 +377,43 @@ if __name__ == "__main__":
     gp_ = ['UNIVERSITY OF CALIFORNIA-DAVIS', 
            'UNIVERSITY OF MICHIGAN-ANN ARBOR']
     
+    with open("data/faculty_page_links.json") as j:
+        dict_ = json.load(j)
     
-    for html in html_list:
-        args.school = re.sub("_faculty_page.html", "", html)
-        log.info("Parsing {}".foramt(args.school))
+    for school, url in dict_.items():
+        args.school = school
+        c = 0
+        html = get_html(args.school, url, c)
+        if args.school in gp0:
+            next_url = parse_school0(html, c)
+            while next_url != None:
+                c += 1
+                html = get_html(args.school, next_url, c)
+                next_url = parse_school0(html, c)
         if args.school in gp1:
-            get_jr_faculty1(html)
+            parse_school1(html)
         if args.school in gp2:
-            get_jr_faculty2(html)
+            parse_school2(html)
         if args.school in gp3:
-            get_jr_faculty3(html)
+            parse_school3(html)
+        if args.school in gp4:
+            next_url = parse_school4(html, c)
+            while next_url != None:
+                c += 1
+                html = get_html(school, next_url, c)
+                next_url = parse_school4(html, c)
         if args.school in gp_:
-            log.info("Cannot parse html")
+            log.info("Unable to parse html")
         if "EMORY" in args.school:
-            get_emory(html)
-        if "INDIANA" in args.school:
-            get_indiana(html)
+            parse_emory(html)
         if "LOS ANGELES" in args.school:
-            get_ucla(html)
+            parse_ucla(html)
         if "ROCHESTER" in args.school:
-            get_rochester(html)
+            parse_rochester(html)
+    
     sys.exit()
     
-    
-    
-    
+
     
     
     
